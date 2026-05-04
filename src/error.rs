@@ -27,6 +27,7 @@ pub enum ErrorCode {
     UnprocessableEntity,
     TooManyRequests,
     Internal,
+    NotImplemented,
     ServiceUnavailable,
 }
 
@@ -42,6 +43,7 @@ impl ErrorCode {
             Self::UnprocessableEntity => "unprocessable_entity",
             Self::TooManyRequests => "too_many_requests",
             Self::Internal => "internal_error",
+            Self::NotImplemented => "not_implemented",
             Self::ServiceUnavailable => "service_unavailable",
         }
     }
@@ -57,6 +59,7 @@ impl ErrorCode {
             Self::UnprocessableEntity => StatusCode::UNPROCESSABLE_ENTITY,
             Self::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -115,6 +118,10 @@ impl AppError {
 
     pub fn internal(message: impl Into<Cow<'static, str>>) -> Self {
         Self::new(ErrorCode::Internal, message)
+    }
+
+    pub fn not_implemented(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(ErrorCode::NotImplemented, message)
     }
 
     pub fn service_unavailable(message: impl Into<Cow<'static, str>>) -> Self {

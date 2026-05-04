@@ -1,11 +1,6 @@
 //! Shared test harness.
 
-#![allow(
-    dead_code,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic
-)]
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
 //! Each `TestApp::spawn` brings up a fresh Postgres container, runs
 //! migrations, configures the app with a deterministic test JWT secret,

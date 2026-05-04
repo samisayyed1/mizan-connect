@@ -51,13 +51,31 @@ pub fn build_app(state: AppState) -> Router {
         )
     });
 
+    // Legacy versioned mount. Kept live for tests and any internal callers.
     let v1 = Router::new()
         .merge(crate::users::router())
+        .with_state(state.clone());
+
+    // Production mount. The desktop client (samisayyed1/mizan-4) calls
+    // `/api/v1/...` — a relic of upstream Wealthfolio's API shape that we
+    // can't change because the desktop's Rust HTTP client is out of scope
+    // for backend chunks. We expose:
+    //   - /api/v1/me            (alias of /v1/me)
+    //   - /api/v1/user/me       (alias of /v1/me — desktop's actual call)
+    //   - /api/v1/subscription/plans, /api/v1/sync/brokerage/* — 501 stubs
+    let api_v1 = Router::new()
+        .merge(crate::users::router())
+        .route(
+            "/user/me",
+            axum::routing::get(crate::users::handlers::get_me),
+        )
+        .merge(crate::connect::router())
         .with_state(state.clone());
 
     Router::new()
         .merge(crate::health::router())
         .nest("/v1", v1)
+        .nest("/api/v1", api_v1)
         .with_state(state)
         // The order matters: outermost layer is added last.
         .layer(nosniff)
