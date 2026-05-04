@@ -151,6 +151,14 @@ mod tests {
                 traces_sample_rate: 0.0,
             },
             test_jwt_secret: Some(SecretString::from(String::from("test-secret"))),
+            snaptrade: crate::config::SnaptradeConfig {
+                client_id: String::new(),
+                consumer_key: SecretString::from(String::new()),
+                api_base: "https://api.snaptrade.invalid/api/v1".into(),
+                redirect_uri: "http://127.0.0.1/cb".into(),
+                broker_secret_encryption_key: vec![],
+                state_secret: SecretString::from(String::new()),
+            },
         }
     }
 

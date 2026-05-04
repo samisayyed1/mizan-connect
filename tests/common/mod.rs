@@ -12,8 +12,10 @@ use std::time::Duration;
 
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use mizan_connect::auth::JwksCache;
-use mizan_connect::config::{AppEnv, Config, LogFormat, SentryConfig};
+use mizan_connect::config::{AppEnv, Config, LogFormat, SentryConfig, SnaptradeConfig};
 use mizan_connect::server::build_app;
+use mizan_connect::snaptrade::client::SnaptradeClient;
+use mizan_connect::snaptrade::encryption::EncryptionKey;
 use mizan_connect::state::AppState;
 use reqwest::Client;
 use secrecy::SecretString;
@@ -24,7 +26,11 @@ use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::ContainerAsync;
 use time::OffsetDateTime;
 
-const TEST_JWT_SECRET: &str = "mizan-test-secret-do-not-ship-please";
+pub const TEST_JWT_SECRET: &str = "mizan-test-secret-do-not-ship-please";
+pub const TEST_STATE_SECRET: &str = "mizan-snaptrade-state-secret-32+bytes-at-least-thanks";
+pub const TEST_ENCRYPTION_KEY: [u8; 32] = [42u8; 32];
+pub const TEST_SNAPTRADE_CLIENT_ID: &str = "MIZAN-TEST";
+pub const TEST_SNAPTRADE_CONSUMER_KEY: &str = "test-consumer-key-do-not-rotate";
 const TEST_ISSUER: &str = "https://test.supabase.co/auth/v1";
 
 /// Live test server bound to a random port on `127.0.0.1`.
@@ -37,7 +43,15 @@ pub struct TestApp {
 }
 
 impl TestApp {
+    /// Spawn with the production SnapTrade base URL. Use this when no test
+    /// will exercise the SnapTrade client (existing health/auth/connect tests).
     pub async fn spawn() -> Self {
+        Self::spawn_with_snaptrade("https://api.snaptrade.invalid/api/v1").await
+    }
+
+    /// Spawn with a caller-provided SnapTrade base URL — for snaptrade
+    /// integration tests that point at a wiremock server.
+    pub async fn spawn_with_snaptrade(snaptrade_api_base: &str) -> Self {
         let _ = tracing_subscriber::fmt()
             .with_test_writer()
             .with_max_level(tracing::Level::WARN)
@@ -89,11 +103,27 @@ impl TestApp {
                 traces_sample_rate: 0.0,
             },
             test_jwt_secret: Some(SecretString::from(String::from(TEST_JWT_SECRET))),
+            snaptrade: SnaptradeConfig {
+                client_id: TEST_SNAPTRADE_CLIENT_ID.into(),
+                consumer_key: SecretString::from(String::from(TEST_SNAPTRADE_CONSUMER_KEY)),
+                api_base: snaptrade_api_base.to_string(),
+                redirect_uri: "http://127.0.0.1/api/v1/sync/snaptrade/callback".into(),
+                broker_secret_encryption_key: TEST_ENCRYPTION_KEY.to_vec(),
+                state_secret: SecretString::from(String::from(TEST_STATE_SECRET)),
+            },
         };
 
         let jwks = JwksCache::new(config.jwks_url());
         // Don't warm — test path uses HS256 fallback so JWKS is unreachable.
-        let state = AppState::new(config.clone(), pool.clone(), jwks);
+        let snaptrade = SnaptradeClient::new(
+            snaptrade_api_base.to_string(),
+            TEST_SNAPTRADE_CLIENT_ID,
+            SecretString::from(String::from(TEST_SNAPTRADE_CONSUMER_KEY)),
+        )
+        .expect("SnaptradeClient");
+        let encryption = EncryptionKey::from_bytes(&TEST_ENCRYPTION_KEY).expect("32-byte test key");
+
+        let state = AppState::new(config.clone(), pool.clone(), jwks, snaptrade, encryption);
         let app = build_app(state);
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))

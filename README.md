@@ -10,10 +10,12 @@ Mizan Connect is a Rust + Axum HTTP service that handles cross-device concerns f
 
 | Capability | Status |
 |------------|--------|
-| User auth (Supabase IdP, JWKS verification) | **Chunk 1 — current** |
-| Stripe-backed subscription billing | Chunk 2 |
-| SnapTrade brokerage integration | Chunk 3 |
-| End-to-end encrypted device sync | Chunk 4 |
+| User auth (Supabase IdP, JWKS verification) | Chunk 1 — shipped |
+| `/api/v1/...` aliases + 501 stubs + desktop wiring | Chunk 2 — shipped |
+| SnapTrade brokerage integration | **Chunk 3 — current** |
+| Stripe-backed subscription billing | Chunk 4 |
+| Background broker sync + Redis-backed rate limit | Chunk 5 |
+| End-to-end encrypted device sync | Chunk 6 |
 
 The desktop client is open-source (AGPL-3.0). This backend is **not**.
 
@@ -120,8 +122,18 @@ src/
 |--------|------|------|-------------|
 | `GET` | `/health` | public | Liveness — version + commit |
 | `GET` | `/ready` | public | Readiness — DB + JWKS health (503 if not ready) |
-| `GET` | `/v1/me` | bearer | Current user |
+| `GET` | `/v1/me` | bearer | Current user (legacy path) |
 | `PATCH` | `/v1/me` | bearer | Update `display_name` |
+| `GET` | `/api/v1/user/me` | bearer | Current user (desktop call site) |
+| `GET` | `/api/v1/subscription/plans` | optional | Stripe plan catalog (Chunk 4 stub — 501) |
+| `POST` | `/api/v1/sync/brokerage/login-portal` | bearer | Issue a SnapTrade Connection Portal URL (10/hr/user) |
+| `GET` | `/api/v1/sync/snaptrade/callback` | **public, state-bound** | SnapTrade redirect target |
+| `GET` | `/api/v1/sync/brokerage/connections` | bearer | Live broker authorizations |
+| `GET` | `/api/v1/sync/brokerage/accounts` | bearer | Live broker accounts |
+| `GET` | `/api/v1/sync/brokerage/accounts/:id/holdings` | bearer | Live positions |
+| `GET` | `/api/v1/sync/brokerage/accounts/:id/activities` | bearer | Transactions, paginated (`?cursor=&limit=`) |
+| `POST` | `/api/v1/sync/brokerage/connections/:id/refresh` | bearer | Force SnapTrade re-poll |
+| `DELETE` | `/api/v1/sync/brokerage/connections/:id` | bearer | Disconnect + soft-delete (idempotent) |
 
 Error responses follow:
 
@@ -181,10 +193,15 @@ The desktop client (`samisayyed1/mizan-4`) reads `CONNECT_AUTH_URL` and friends 
 
 ## Roadmap
 
-- **Chunk 1 (current):** foundation, JWT auth, `/v1/me`.
-- **Chunk 2:** Stripe billing — webhooks, subscription state machine, plan limits.
-- **Chunk 3:** SnapTrade integration — broker-connection lifecycle, sync jobs, dead-letter handling.
-- **Chunk 4:** E2EE device sync — paired devices, encrypted blobs, key rotation.
+- **Chunk 1 (shipped):** foundation, JWT auth, `/v1/me`.
+- **Chunk 2 (shipped):** `/api/v1/...` aliases + 501 stubs + desktop wiring.
+- **Chunk 3 (current):** SnapTrade integration — broker connection lifecycle,
+  HMAC-signed client, AES-256-GCM userSecret-at-rest, callback state JWTs,
+  per-user rate limit.
+- **Chunk 4:** Stripe billing — webhooks, subscription state machine, plan limits.
+- **Chunk 5:** background broker sync (4-hour poll), dead-letter handling,
+  Redis-backed rate limit (drops the in-memory `LoginPortalLimiter`).
+- **Chunk 6:** E2EE device sync — paired devices, encrypted blobs, key rotation.
 
 ## License
 

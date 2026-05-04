@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO broker_connections (\n            user_id,\n            snaptrade_user_id,\n            snaptrade_user_secret_encrypted,\n            connection_type,\n            is_active\n        )\n        VALUES ($1, $2, $3, 'snaptrade', FALSE)\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8ff2cd55b992fdd0f9ca64266317835bcb0259bed3c303cbd14352ecaf7f1760"
+}

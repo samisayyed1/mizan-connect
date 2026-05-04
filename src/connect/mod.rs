@@ -1,20 +1,13 @@
-//! `/api/v1/...` Connect-API stubs.
+//! `/api/v1/...` Connect-API stubs that haven't migrated to feature
+//! modules yet.
 //!
-//! Chunk-1 placeholders for routes the Mizan desktop client expects to
-//! exist. Each handler returns `501 Not Implemented` with the standard
-//! `AppError` envelope so the client can render "Coming Soon" UI without
-//! console-error spam. Real implementations land in Chunks 2–4.
+//! After Chunk 3, the only remaining stub here is `/subscription/plans`,
+//! which is reachable with or without a bearer token (the desktop client
+//! calls it from two distinct functions). Stripe billing in Chunk 4 will
+//! replace this stub with a real handler.
 //!
-//! Auth policy:
-//! - Brokerage / accounts / sync endpoints: behind `AuthenticatedUser`,
-//!   so unauthenticated callers see 401 (matching production behaviour).
-//! - `subscription/plans`: returns 501 regardless of auth. The desktop
-//!   client calls this path with and without a bearer token from two
-//!   different functions (`get_subscription_plans` and
-//!   `fetch_subscription_plans_public`), both at the same URL — so the
-//!   stub must be reachable in either state. Once Stripe ships in a
-//!   later chunk, the authed variant will return the user's plan and
-//!   the unauthed variant will keep returning the public price catalog.
+//! The brokerage routes that used to live here moved to
+//! [`crate::snaptrade::router`].
 
 pub mod handlers;
 
@@ -25,24 +18,5 @@ use crate::state::AppState;
 
 /// Router mounted at `/api/v1`.
 pub fn router() -> Router<AppState> {
-    Router::new()
-        // Reachable with or without auth — see module docstring.
-        .route("/subscription/plans", get(handlers::subscription_plans))
-        // Authed surfaces — return 401 first when no bearer token.
-        .route(
-            "/sync/brokerage/connections",
-            get(handlers::brokerage_connections),
-        )
-        .route(
-            "/sync/brokerage/accounts",
-            get(handlers::brokerage_accounts),
-        )
-        .route(
-            "/sync/brokerage/accounts/:id/activities",
-            get(handlers::brokerage_account_activities),
-        )
-        .route(
-            "/sync/brokerage/accounts/:id/holdings",
-            get(handlers::brokerage_account_holdings),
-        )
+    Router::new().route("/subscription/plans", get(handlers::subscription_plans))
 }

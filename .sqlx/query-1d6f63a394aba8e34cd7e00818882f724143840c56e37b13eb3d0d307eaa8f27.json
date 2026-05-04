@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id,\n               user_id,\n               snaptrade_user_id,\n               snaptrade_user_secret_encrypted,\n               snaptrade_authorization_id,\n               broker_slug,\n               institution_name,\n               is_active,\n               disabled\n        FROM broker_connections\n        WHERE user_id = $1\n          AND connection_type = 'snaptrade'\n          AND is_active = TRUE\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "snaptrade_user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "snaptrade_user_secret_encrypted",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 4,
+        "name": "snaptrade_authorization_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "broker_slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "institution_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "disabled",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "1d6f63a394aba8e34cd7e00818882f724143840c56e37b13eb3d0d307eaa8f27"
+}

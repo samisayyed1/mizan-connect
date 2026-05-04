@@ -13,10 +13,53 @@ Mizan Connect handles: user auth (via Supabase as IdP), subscription billing
 (Stripe), brokerage sync (SnapTrade), and E2EE device sync.
 
 ## Build status
-- Chunk 1: foundation + Supabase JWT auth ← CURRENT
-- Chunk 2: Stripe billing
-- Chunk 3: SnapTrade integration
-- Chunk 4: E2EE device sync
+- Chunk 1: foundation + Supabase JWT auth ✓ shipped
+- Chunk 2: `/api/v1/...` aliases + 501 stubs + desktop wiring ✓ shipped
+- Chunk 3: SnapTrade integration ← CURRENT
+- Chunk 4: Stripe billing
+- Chunk 5: background sync (Redis-backed rate limit + cron poll)
+- Chunk 6: E2EE device sync
+
+## Module map (post-Chunk 3)
+- `src/auth/` — Supabase JWKS + JWT verification, `AuthenticatedUser` extractor.
+- `src/users/` — `/v1/me` and `/api/v1/user/me`.
+- `src/connect/` — `/api/v1/subscription/plans` 501 stub (Chunk 4 territory).
+- `src/snaptrade/` — broker integration. See [`signing.rs`](src/snaptrade/signing.rs)
+  doc-comment for the canonical-request format (cited from the official Ruby SDK).
+  - `signing.rs`: HMAC-SHA256 signer; frozen-vector unit test pins the canonical form.
+  - `encryption.rs`: AES-256-GCM for SnapTrade `userSecret` at rest; startup self-test.
+  - `state_token.rs`: HS256 JWT bound to local user (10-min TTL).
+  - `client.rs`: typed reqwest wrapper; per-request signed.
+  - `rate_limit.rs`: per-user 10/hour bucket on top of `tower_governor`.
+  - `repository.rs`: SQLx queries on `broker_connections`.
+  - `handlers.rs`: 8 endpoints; `snaptrade_callback` is the only public route in
+    the module.
+
+## Required env vars (Chunk 3)
+| Var | Required when | Notes |
+|-----|---------------|-------|
+| `SNAPTRADE_CLIENT_ID` | `APP_ENV != test` | from SnapTrade dashboard |
+| `SNAPTRADE_CONSUMER_KEY` | `APP_ENV != test` | secret; never logged |
+| `SNAPTRADE_API_BASE` | always | default `https://api.snaptrade.com/api/v1` |
+| `SNAPTRADE_REDIRECT_URI` | `APP_ENV != test` | must be whitelisted in SnapTrade dashboard |
+| `MIZAN_BROKER_SECRET_ENCRYPTION_KEY` | `APP_ENV != test` | base64; decode → exactly 32 bytes |
+| `MIZAN_SNAPTRADE_STATE_SECRET` | `APP_ENV != test` | base64; decode → ≥ 32 bytes |
+
+## Things to know operationally
+- **Sandbox vs production**: SnapTrade does NOT use a separate sandbox host. Sandbox
+  keys hit `api.snaptrade.com` exactly as production keys do; the difference is
+  the connection limit (~5) and that some institutions return mock data only.
+- **Rate limiter scope**: `/login-portal` is rate-limited 10/hour per local user
+  via an in-memory `HashMap<Uuid, Vec<OffsetDateTime>>` in `AppState`. This is
+  single-instance only. **Chunk 5 prereq**: move to Redis (or `tokio` channel +
+  Postgres) before scaling beyond one Fly machine.
+- **Audit events**: `broker.connect.{initiated,completed,failed}`,
+  `broker.disconnect`, `broker.refresh`. `event_data` JSONB never includes the
+  SnapTrade `userSecret`.
+- **Frozen-signature test**: `src/snaptrade/signing.rs::frozen_vector_locks_canonical_form`
+  pins one input → expected base64 signature. If it ever fails, the canonical
+  request shape (or serde_json's Map order, or the HMAC crate behavior) changed —
+  audit the diff before silencing.
 
 ## Architecture invariants (NEVER violate these)
 1. **Supabase is the IdP.** We never store passwords. JWTs verified server-side via JWKS.

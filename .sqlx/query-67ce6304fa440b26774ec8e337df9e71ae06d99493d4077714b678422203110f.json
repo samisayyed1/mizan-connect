@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE broker_connections\n           SET snaptrade_authorization_id = $2,\n               broker_slug = COALESCE($3, broker_slug),\n               institution_name = COALESCE($4, institution_name),\n               is_active = TRUE,\n               disabled = FALSE,\n               updated_at = NOW()\n         WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "67ce6304fa440b26774ec8e337df9e71ae06d99493d4077714b678422203110f"
+}

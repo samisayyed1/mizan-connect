@@ -88,6 +88,14 @@ parking_lot = "0.12"
 secrecy = "0.10"
 base64 = "0.22"
 
+# SnapTrade integration (Chunk 3)
+hmac = "0.12"
+sha2 = "0.10"
+aes-gcm = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+hex = "0.4"
+url = "2.5"
+
 # Build info
 rustc_version_runtime = "0.3"
 
@@ -100,6 +108,7 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serial_test = "3"
+wiremock = "0.6"
 
 [lints.rust]
 unsafe_code = "forbid"

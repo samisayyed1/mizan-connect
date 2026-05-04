@@ -4,7 +4,12 @@
 
 use anyhow::Context;
 use mizan_connect::{
-    auth::JwksCache, config::Config, db, server, shutdown, state::AppState, telemetry,
+    auth::JwksCache,
+    config::Config,
+    db, server, shutdown,
+    snaptrade::{client::SnaptradeClient, encryption::EncryptionKey},
+    state::AppState,
+    telemetry,
 };
 use tokio::net::TcpListener;
 
@@ -31,7 +36,23 @@ async fn main() -> anyhow::Result<()> {
     jwks.warm().await;
     let _refresher = jwks.spawn_refresher();
 
-    let state = AppState::new(config.clone(), pool, jwks);
+    // Self-test the broker-secret encryption key before binding a port —
+    // a misconfigured key here would silently corrupt every SnapTrade row.
+    let encryption = EncryptionKey::from_bytes(&config.snaptrade.broker_secret_encryption_key)
+        .context("MIZAN_BROKER_SECRET_ENCRYPTION_KEY length validation")?;
+    encryption
+        .self_test()
+        .context("AES-256-GCM self-test failed (broker secret encryption key is unusable)")?;
+    tracing::info!("AES-256-GCM self-test passed");
+
+    let snaptrade = SnaptradeClient::new(
+        config.snaptrade.api_base.clone(),
+        config.snaptrade.client_id.clone(),
+        config.snaptrade.consumer_key.clone(),
+    )
+    .context("constructing SnaptradeClient")?;
+
+    let state = AppState::new(config.clone(), pool, jwks, snaptrade, encryption);
     let app = server::build_app(state);
     let addr = server::bind_addr(&config);
 

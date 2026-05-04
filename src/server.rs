@@ -60,9 +60,11 @@ pub fn build_app(state: AppState) -> Router {
     // `/api/v1/...` — a relic of upstream Wealthfolio's API shape that we
     // can't change because the desktop's Rust HTTP client is out of scope
     // for backend chunks. We expose:
-    //   - /api/v1/me            (alias of /v1/me)
-    //   - /api/v1/user/me       (alias of /v1/me — desktop's actual call)
-    //   - /api/v1/subscription/plans, /api/v1/sync/brokerage/* — 501 stubs
+    //   - /api/v1/me                            (alias of /v1/me)
+    //   - /api/v1/user/me                       (desktop's actual call)
+    //   - /api/v1/subscription/plans            (Chunk 4 stub)
+    //   - /api/v1/sync/brokerage/*              (Chunk 3 — real, SnapTrade-backed)
+    //   - /api/v1/sync/snaptrade/callback       (PUBLIC — bound by state JWT)
     let api_v1 = Router::new()
         .merge(crate::users::router())
         .route(
@@ -70,6 +72,7 @@ pub fn build_app(state: AppState) -> Router {
             axum::routing::get(crate::users::handlers::get_me),
         )
         .merge(crate::connect::router())
+        .merge(crate::snaptrade::router())
         .with_state(state.clone());
 
     Router::new()

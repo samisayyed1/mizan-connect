@@ -16,6 +16,7 @@ pub mod health;
 pub mod middleware;
 pub mod server;
 pub mod shutdown;
+pub mod snaptrade;
 pub mod state;
 pub mod telemetry;
 pub mod users;

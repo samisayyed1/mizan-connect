@@ -94,6 +94,22 @@ pub struct Config {
     /// HS256 secret accepted by the auth layer in non-production builds.
     /// Always `None` when `app_env == Production`, regardless of env value.
     pub test_jwt_secret: Option<SecretString>,
+
+    /// SnapTrade integration (Chunk 3). Required outside of test env.
+    pub snaptrade: SnaptradeConfig,
+}
+
+/// SnapTrade configuration. Required outside of `APP_ENV=test`.
+#[derive(Debug, Clone)]
+pub struct SnaptradeConfig {
+    pub client_id: String,
+    pub consumer_key: SecretString,
+    pub api_base: String,
+    pub redirect_uri: String,
+    /// AES-256-GCM key bytes — exactly 32 bytes after base64 decode.
+    pub broker_secret_encryption_key: Vec<u8>,
+    /// HS256 signing key for callback state JWTs — ≥ 32 bytes.
+    pub state_secret: SecretString,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +120,10 @@ pub enum ConfigError {
     Invalid { var: &'static str, reason: String },
     #[error("CORS allowlist may not contain '*' when auth is enabled")]
     CorsWildcardWithAuth,
+    #[error("MIZAN_BROKER_SECRET_ENCRYPTION_KEY must decode to exactly 32 bytes (got {0})")]
+    BadEncryptionKeyLength(usize),
+    #[error("MIZAN_SNAPTRADE_STATE_SECRET must decode to >= 32 bytes (got {0})")]
+    StateSecretTooShort(usize),
     #[error("figment: {0}")]
     Figment(#[from] figment::Error),
 }
@@ -132,6 +152,14 @@ struct RawConfig {
     sentry_traces_sample_rate: Option<f32>,
 
     mizan_test_jwt_secret: Option<String>,
+
+    // SnapTrade (Chunk 3)
+    snaptrade_client_id: Option<String>,
+    snaptrade_consumer_key: Option<String>,
+    snaptrade_api_base: Option<String>,
+    snaptrade_redirect_uri: Option<String>,
+    mizan_broker_secret_encryption_key: Option<String>,
+    mizan_snaptrade_state_secret: Option<String>,
 }
 
 impl Config {
@@ -174,6 +202,10 @@ impl Config {
             !app_env.is_test(),
         )?;
 
+        // Build SnapTrade config first — it borrows `&raw` and would
+        // otherwise conflict with the `raw.…` field moves below.
+        let snaptrade = build_snaptrade_config(&raw, app_env)?;
+
         let test_jwt_secret = if app_env.is_production() {
             None
         } else {
@@ -215,6 +247,7 @@ impl Config {
             rate_limit_per_minute: raw.rate_limit_per_minute.unwrap_or(100).max(1),
             sentry,
             test_jwt_secret,
+            snaptrade,
         })
     }
 
@@ -229,6 +262,112 @@ impl Config {
     /// Expected JWT issuer (`iss`) claim.
     pub fn supabase_jwt_issuer(&self) -> String {
         format!("{}/auth/v1", self.supabase_url.trim_end_matches('/'))
+    }
+}
+
+fn build_snaptrade_config(
+    raw: &RawConfig,
+    app_env: AppEnv,
+) -> Result<SnaptradeConfig, ConfigError> {
+    use base64::Engine;
+
+    let required = !app_env.is_test();
+    let api_base = raw
+        .snaptrade_api_base
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://api.snaptrade.com/api/v1".to_string());
+
+    let client_id = pick_required(
+        "SNAPTRADE_CLIENT_ID",
+        raw.snaptrade_client_id.as_deref(),
+        required,
+    )?
+    .unwrap_or_default();
+    let consumer_key_str = pick_required(
+        "SNAPTRADE_CONSUMER_KEY",
+        raw.snaptrade_consumer_key.as_deref(),
+        required,
+    )?
+    .unwrap_or_default();
+    let redirect_uri = pick_required(
+        "SNAPTRADE_REDIRECT_URI",
+        raw.snaptrade_redirect_uri.as_deref(),
+        required,
+    )?
+    .unwrap_or_default();
+
+    // Encryption key — base64 → exactly 32 bytes.
+    let enc_key_b64 = pick_required(
+        "MIZAN_BROKER_SECRET_ENCRYPTION_KEY",
+        raw.mizan_broker_secret_encryption_key.as_deref(),
+        required,
+    )?;
+    let broker_secret_encryption_key = match enc_key_b64 {
+        Some(s) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(s.trim())
+                .map_err(|e| ConfigError::Invalid {
+                    var: "MIZAN_BROKER_SECRET_ENCRYPTION_KEY",
+                    reason: format!("base64 decode: {e}"),
+                })?;
+            if bytes.len() != 32 {
+                return Err(ConfigError::BadEncryptionKeyLength(bytes.len()));
+            }
+            bytes
+        }
+        None => Vec::new(), // test env without key — encryption is opt-in
+    };
+
+    // State secret — base64 → >= 32 bytes.
+    let state_b64 = pick_required(
+        "MIZAN_SNAPTRADE_STATE_SECRET",
+        raw.mizan_snaptrade_state_secret.as_deref(),
+        required,
+    )?;
+    let state_secret = match state_b64 {
+        Some(s) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(s.trim())
+                .map_err(|e| ConfigError::Invalid {
+                    var: "MIZAN_SNAPTRADE_STATE_SECRET",
+                    reason: format!("base64 decode: {e}"),
+                })?;
+            if bytes.len() < 32 {
+                return Err(ConfigError::StateSecretTooShort(bytes.len()));
+            }
+            // jsonwebtoken's HS256 takes the raw bytes — keep the raw
+            // string so the secret survives across processes regardless
+            // of base64 padding canonicalization.
+            SecretString::from(s)
+        }
+        None => SecretString::from(String::new()),
+    };
+
+    Ok(SnaptradeConfig {
+        client_id,
+        consumer_key: SecretString::from(consumer_key_str),
+        api_base,
+        redirect_uri,
+        broker_secret_encryption_key,
+        state_secret,
+    })
+}
+
+/// `pick_required(var, raw, required)`:
+/// - if `raw` is non-empty → `Ok(Some(value))`
+/// - if `raw` is empty AND `required` → `Err(Missing)`
+/// - otherwise → `Ok(None)`
+fn pick_required(
+    var: &'static str,
+    raw: Option<&str>,
+    required: bool,
+) -> Result<Option<String>, ConfigError> {
+    let value = raw.map(str::trim).filter(|s| !s.is_empty());
+    match value {
+        Some(v) => Ok(Some(v.to_string())),
+        None if required => Err(ConfigError::Missing(var)),
+        None => Ok(None),
     }
 }
 
