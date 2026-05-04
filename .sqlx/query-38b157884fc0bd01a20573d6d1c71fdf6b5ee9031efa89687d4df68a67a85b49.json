@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO users (supabase_user_id, email, display_name, avatar_url)\n        VALUES ($1, $2, $3, $4)\n        ON CONFLICT (supabase_user_id) DO UPDATE\n            SET email = EXCLUDED.email,\n                display_name = COALESCE(EXCLUDED.display_name, users.display_name),\n                avatar_url   = COALESCE(EXCLUDED.avatar_url,   users.avatar_url),\n                updated_at   = NOW(),\n                deleted_at   = NULL\n        RETURNING\n            id,\n            supabase_user_id,\n            email,\n            display_name,\n            avatar_url,\n            created_at,\n            updated_at,\n            deleted_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "supabase_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "deleted_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "38b157884fc0bd01a20573d6d1c71fdf6b5ee9031efa89687d4df68a67a85b49"
+}

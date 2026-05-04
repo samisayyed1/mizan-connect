@@ -1,0 +1,59 @@
+# Mizan Connect — Fly.io app spec.
+# `fly launch` will overwrite some fields; `app` and `primary_region` are
+# the keys that should remain stable.
+
+app = "mizan-connect"
+primary_region = "sin"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  APP_HOST = "0.0.0.0"
+  APP_PORT = "8080"
+  APP_ENV = "production"
+  LOG_FORMAT = "json"
+  RUST_BACKTRACE = "1"
+
+# All other secrets via `fly secrets set`:
+#   DATABASE_URL=...
+#   SUPABASE_URL=...
+#   SUPABASE_JWT_AUDIENCE=authenticated
+#   MIZAN_CORS_ALLOWED_ORIGINS=https://app.mizan.app,...
+#   SENTRY_DSN=...
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "10s"
+    timeout = "3s"
+    grace_period = "10s"
+    protocol = "http"
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/ready"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    protocol = "http"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"
