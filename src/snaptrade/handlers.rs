@@ -147,31 +147,32 @@ pub struct CallbackQuery {
     pub state: Option<String>,
     /// SnapTrade user identifier as it appears in our `broker_connections`
     /// row (we set this to our local users.id UUID at registerUser time).
+    /// SnapTrade's portal redirect carries `state` and `userId` only —
+    /// notably NOT `authorizationId` — so we look up the authorization
+    /// via `GET /authorizations` after verifying state.
     #[serde(default, rename = "userId", alias = "snapTradeUserId")]
     pub user_id: Option<String>,
-    /// Authorization (connection) id assigned by SnapTrade after the
-    /// user completes the broker login.
-    #[serde(
-        default,
-        rename = "authorizationId",
-        alias = "brokerageAuthorizationId",
-        alias = "authorizationID"
-    )]
-    pub authorization_id: Option<String>,
-    /// Optional broker slug surface from SnapTrade (best-effort).
-    #[serde(default, rename = "brokerage", alias = "brokerSlug")]
-    pub brokerage: Option<String>,
-    /// Optional institution display name.
-    #[serde(default, rename = "institutionName")]
-    pub institution_name: Option<String>,
 }
 
 /// `GET /api/v1/sync/snaptrade/callback`
 ///
-/// Public endpoint. Verifies the state JWT, resolves the user, persists
-/// the SnapTrade authorization id, and returns a minimal HTML success
-/// page. Returns 400 with the standard error envelope on any verification
-/// or persistence failure.
+/// Public endpoint. Verifies the state JWT, resolves the user, then calls
+/// SnapTrade's `GET /authorizations` to find the authorization that was
+/// just created (SnapTrade's portal redirect does NOT carry an
+/// `authorizationId` query param — only `state` + `userId`). Persists the
+/// resolved authorization id and returns an HTML page.
+///
+/// Idempotency: the table has at most one active SnapTrade row per user
+/// (enforced by the partial unique index `uq_broker_conn_user_snaptrade`).
+/// Replay calls find the same authorization already on the row, treat
+/// the candidate set as empty, and return the success HTML without
+/// touching the DB or audit log.
+///
+/// Returns 400 only for verification failures (missing/bad state, no
+/// pending row, userId mismatch). Upstream `/authorizations` failures
+/// surface as the standard SnapTrade `AppError`. The "no new
+/// authorization found" path renders a user-friendly 200 HTML page —
+/// SnapTrade redirected the user here, so a JSON 4xx would be jarring.
 pub async fn snaptrade_callback(
     State(state): State<AppState>,
     Query(q): Query<CallbackQuery>,
@@ -189,11 +190,6 @@ pub async fn snaptrade_callback(
     })?;
     let local_user_id = claims.sub;
 
-    let authorization_id = q.authorization_id.as_deref().ok_or_else(|| {
-        record_failure_locked(pool, Some(local_user_id), "missing_authorization", None);
-        AppError::bad_request("missing authorizationId")
-    })?;
-
     // Look up the connection by user; if SnapTrade also passed back userId
     // we cross-check it for defense-in-depth.
     let row = repository::fetch_any_for_user(pool, local_user_id)
@@ -210,30 +206,88 @@ pub async fn snaptrade_callback(
         }
     }
 
-    let broker_slug = q.brokerage.as_deref();
-    let institution_name = q.institution_name.as_deref();
-    repository::mark_completed(
-        pool,
-        row.id,
-        authorization_id,
-        broker_slug,
-        institution_name,
-    )
-    .await?;
+    // Fetch the user's authorizations from SnapTrade and pick the newly
+    // created one. Any authorization already on the row is filtered out
+    // so callback replays are no-ops.
+    let user_secret = state
+        .encryption()
+        .decrypt(&row.snaptrade_user_secret_encrypted)?;
+    let authorizations = state
+        .snaptrade()
+        .list_authorizations(&row.snaptrade_user_id, &user_secret)
+        .await
+        .inspect_err(|_| {
+            record_failure_locked(
+                pool,
+                Some(local_user_id),
+                "list_authorizations_failed",
+                None,
+            );
+        })?;
+
+    let existing_id = row.snaptrade_authorization_id.as_deref();
+    let chosen = pick_newest_authorization(&authorizations, existing_id);
+
+    let Some(auth) = chosen else {
+        // No new authorization. If the row already has one, this is a
+        // replay → success page (no DB write, no duplicate audit). If it
+        // doesn't, SnapTrade redirected the user here without recording an
+        // authorization → render the user-friendly "didn't complete" page.
+        if existing_id.is_some() {
+            return Ok((StatusCode::OK, Html(success_html())).into_response());
+        }
+        record_failure_locked(pool, Some(local_user_id), "no_new_authorization", None);
+        return Ok((StatusCode::OK, Html(connection_failed_html())).into_response());
+    };
+
+    let broker_slug = auth.brokerage.as_ref().map(|b| b.slug.as_str());
+    let institution_name = auth
+        .brokerage
+        .as_ref()
+        .and_then(|b| b.display_name.as_deref().or(Some(b.name.as_str())));
+    repository::mark_completed(pool, row.id, &auth.id, broker_slug, institution_name).await?;
 
     let _ = audit::record_event(
         pool,
         audit::AuditEvent::new("broker.connect.completed")
             .user(local_user_id)
             .data(&json!({
-                "authorization_id": authorization_id,
+                "authorization_id": auth.id,
                 "broker_slug": broker_slug,
             })),
     )
     .await;
 
-    let html = success_html();
-    Ok((StatusCode::OK, Html(html)).into_response())
+    Ok((StatusCode::OK, Html(success_html())).into_response())
+}
+
+/// Pick the newest [`StAuthorization`] from `authorizations` that is not
+/// already recorded on the row (`existing_id`).
+///
+/// Newness is determined by parsing `created_date` as RFC 3339; entries
+/// with a missing or unparseable timestamp rank as oldest. Ties are
+/// broken by taking the entry that appears later in the slice
+/// (SnapTrade's response order). Returns `None` if every entry matches
+/// `existing_id` (replay) or the slice is empty.
+fn pick_newest_authorization<'a>(
+    authorizations: &'a [StAuthorization],
+    existing_id: Option<&str>,
+) -> Option<&'a StAuthorization> {
+    use time::format_description::well_known::Rfc3339;
+
+    authorizations
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| existing_id.map(|e| a.id != e).unwrap_or(true))
+        .max_by_key(|(idx, a)| {
+            let ts = a
+                .created_date
+                .as_deref()
+                .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok());
+            // (timestamp, idx) — both monotonically prefer newer/later.
+            (ts, *idx)
+        })
+        .map(|(_, a)| a)
 }
 
 fn record_failure_locked(
@@ -260,6 +314,41 @@ fn record_failure_locked(
             tracing::warn!(error = %err, "audit broker.connect.failed write failed");
         }
     });
+}
+
+fn connection_failed_html() -> String {
+    // Rendered when SnapTrade redirected the user to the callback but no
+    // new authorization was created (e.g. user closed the broker login
+    // mid-flow). HTTP 200 — a JSON 4xx would surface as a raw error to a
+    // browser session that the user is staring at.
+    r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="robots" content="noindex" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Mizan Connect — Connection didn't complete</title>
+    <style>
+      body { margin: 0; font: 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+             color: #f5e6c8; background: #0a0a0a;
+             display: grid; place-items: center; min-height: 100vh; }
+      main { max-width: 28rem; padding: 2rem; text-align: center; }
+      h1 { font-size: 1.25rem; margin: 0 0 .5rem;
+           background: linear-gradient(135deg,#F5E6C8 0%,#D4A574 50%,#8B6F47 100%);
+           -webkit-background-clip: text; background-clip: text; color: transparent; }
+      p { color: #b8a98a; margin: 0; }
+      .mark { font-size: 2.5rem; line-height: 1; margin-bottom: 1rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark" aria-hidden="true">!</div>
+      <h1>Connection didn't complete</h1>
+      <p>Close this window and try again from Mizan.</p>
+    </main>
+  </body>
+</html>"#
+        .to_string()
 }
 
 fn success_html() -> String {

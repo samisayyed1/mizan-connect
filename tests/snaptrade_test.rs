@@ -185,7 +185,7 @@ async fn callback_rejects_tampered_state() {
     let res = app
         .client
         .get(format!(
-            "{}/api/v1/sync/snaptrade/callback?state=not-a-real-jwt&authorizationId=abc",
+            "{}/api/v1/sync/snaptrade/callback?state=not-a-real-jwt",
             app.address
         ))
         .send()
@@ -217,7 +217,7 @@ async fn callback_rejects_expired_state() {
     let res = app
         .client
         .get(format!(
-            "{}/api/v1/sync/snaptrade/callback?state={}&authorizationId=abc",
+            "{}/api/v1/sync/snaptrade/callback?state={}",
             app.address, token
         ))
         .send()
@@ -227,7 +227,7 @@ async fn callback_rejects_expired_state() {
 }
 
 #[tokio::test]
-async fn callback_persists_authorization_and_is_idempotent() {
+async fn callback_resolves_authorization_via_list_and_is_idempotent() {
     let (app, server) = wiremock_app().await;
 
     // First, run a /login-portal to register the user and create the
@@ -245,6 +245,31 @@ async fn callback_persists_authorization_and_is_idempotent() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "redirectURI": "https://app.snaptrade.com/x",
         })))
+        .mount(&server)
+        .await;
+
+    // The callback now calls GET /authorizations to find the new auth id.
+    let auth_id = "auth-1234";
+    Mock::given(method("GET"))
+        .and(path("/api/v1/authorizations"))
+        .and(header_exists("Signature"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": auth_id,
+                "name": "My Robinhood",
+                "type": "trade",
+                "disabled": false,
+                "created_date": "2026-01-02T03:04:05Z",
+                "updated_date": "2026-01-02T03:04:05Z",
+                "brokerage": {
+                    "id": "brk-1",
+                    "slug": "ROBINHOOD",
+                    "name": "Robinhood",
+                    "display_name": "Robinhood",
+                    "enabled": true,
+                }
+            }
+        ])))
         .mount(&server)
         .await;
 
@@ -278,10 +303,10 @@ async fn callback_persists_authorization_and_is_idempotent() {
     )
     .expect("issue state");
 
-    let auth_id = "auth-1234";
+    // SnapTrade redirects with state + userId, NOT authorizationId.
     let url = format!(
-        "{}/api/v1/sync/snaptrade/callback?state={}&authorizationId={}&brokerage=ROBINHOOD",
-        app.address, state, auth_id
+        "{}/api/v1/sync/snaptrade/callback?state={}&userId={}",
+        app.address, state, VALID_SUB
     );
     let res = app.client.get(&url).send().await.expect("first call");
     assert_eq!(res.status(), 200);
@@ -292,21 +317,216 @@ async fn callback_persists_authorization_and_is_idempotent() {
         .map(|s| s.starts_with("text/html"))
         .unwrap_or(false));
 
-    // Second call (idempotent) → still 200.
+    // Second call (idempotent) → still 200, still single row.
     let res2 = app.client.get(&url).send().await.expect("second call");
     assert_eq!(res2.status(), 200);
 
-    // Database: exactly one row with this authorization_id.
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM broker_connections \
+    // Database: exactly one row with this authorization_id, and the
+    // brokerage / institution columns were resolved from the API response.
+    let row: (i64, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT COUNT(*) OVER (), broker_slug, institution_name \
+         FROM broker_connections \
          WHERE user_id = $1 AND snaptrade_authorization_id = $2",
     )
     .bind(user_id)
     .bind(auth_id)
     .fetch_one(&app.pool)
     .await
-    .expect("count");
-    assert_eq!(count.0, 1);
+    .expect("row");
+    assert_eq!(row.0, 1, "expect exactly one matching row after replay");
+    assert_eq!(row.1.as_deref(), Some("ROBINHOOD"));
+    assert_eq!(row.2.as_deref(), Some("Robinhood"));
+}
+
+#[tokio::test]
+async fn callback_renders_failure_page_when_no_authorizations_found() {
+    let (app, server) = wiremock_app().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/snapTrade/registerUser"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "userId": VALID_SUB,
+            "userSecret": "no-auths-secret",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/snapTrade/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "redirectURI": "https://app.snaptrade.com/x",
+        })))
+        .mount(&server)
+        .await;
+    // SnapTrade hasn't recorded any authorization for this user.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/authorizations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let token = app.mint_jwt(
+        VALID_SUB,
+        Some("noauth@example.com"),
+        None,
+        Duration::from_secs(600),
+    );
+    app.client
+        .post(format!(
+            "{}/api/v1/sync/brokerage/login-portal",
+            app.address
+        ))
+        .bearer_auth(&token)
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("init");
+
+    let user_row: (Uuid,) = sqlx::query_as("SELECT id FROM users WHERE email = $1")
+        .bind("noauth@example.com")
+        .fetch_one(&app.pool)
+        .await
+        .expect("user row");
+    let state = state_token::issue(
+        user_row.0,
+        &SecretString::from(String::from(common::TEST_STATE_SECRET)),
+    )
+    .expect("issue state");
+
+    let res = app
+        .client
+        .get(format!(
+            "{}/api/v1/sync/snaptrade/callback?state={}&userId={}",
+            app.address, state, VALID_SUB
+        ))
+        .send()
+        .await
+        .expect("cb");
+    assert_eq!(res.status(), 200);
+    assert!(res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.starts_with("text/html"))
+        .unwrap_or(false));
+    let body = res.text().await.expect("text");
+    assert!(
+        body.contains("didn't complete"),
+        "expected user-friendly failure HTML, got: {body}"
+    );
+
+    // Row stays pending (no authorization id).
+    let auth: (Option<String>,) = sqlx::query_as(
+        "SELECT snaptrade_authorization_id FROM broker_connections WHERE user_id = $1",
+    )
+    .bind(user_row.0)
+    .fetch_one(&app.pool)
+    .await
+    .expect("row");
+    assert_eq!(auth.0, None);
+}
+
+#[tokio::test]
+async fn callback_picks_newest_authorization_ignoring_stale() {
+    let (app, server) = wiremock_app().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/snapTrade/registerUser"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "userId": VALID_SUB,
+            "userSecret": "newest-secret",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/snapTrade/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "redirectURI": "https://app.snaptrade.com/x",
+        })))
+        .mount(&server)
+        .await;
+    // Two authorizations: a stale one (older) and a fresh one. Handler
+    // must pick the latter by created_date.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/authorizations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": "auth-stale",
+                "disabled": false,
+                "created_date": "2025-12-01T00:00:00Z",
+                "updated_date": "2025-12-01T00:00:00Z",
+                "brokerage": {
+                    "id": "brk-1",
+                    "slug": "FIDELITY",
+                    "name": "Fidelity",
+                    "enabled": true,
+                }
+            },
+            {
+                "id": "auth-fresh",
+                "disabled": false,
+                "created_date": "2026-05-01T00:00:00Z",
+                "updated_date": "2026-05-01T00:00:00Z",
+                "brokerage": {
+                    "id": "brk-2",
+                    "slug": "ROBINHOOD",
+                    "name": "Robinhood",
+                    "display_name": "Robinhood",
+                    "enabled": true,
+                }
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let token = app.mint_jwt(
+        VALID_SUB,
+        Some("newest@example.com"),
+        None,
+        Duration::from_secs(600),
+    );
+    app.client
+        .post(format!(
+            "{}/api/v1/sync/brokerage/login-portal",
+            app.address
+        ))
+        .bearer_auth(&token)
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("init");
+
+    let user_row: (Uuid,) = sqlx::query_as("SELECT id FROM users WHERE email = $1")
+        .bind("newest@example.com")
+        .fetch_one(&app.pool)
+        .await
+        .expect("user row");
+    let state = state_token::issue(
+        user_row.0,
+        &SecretString::from(String::from(common::TEST_STATE_SECRET)),
+    )
+    .expect("issue state");
+
+    let res = app
+        .client
+        .get(format!(
+            "{}/api/v1/sync/snaptrade/callback?state={}&userId={}",
+            app.address, state, VALID_SUB
+        ))
+        .send()
+        .await
+        .expect("cb");
+    assert_eq!(res.status(), 200);
+
+    let row: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT snaptrade_authorization_id, broker_slug \
+         FROM broker_connections WHERE user_id = $1",
+    )
+    .bind(user_row.0)
+    .fetch_one(&app.pool)
+    .await
+    .expect("row");
+    assert_eq!(row.0.as_deref(), Some("auth-fresh"));
+    assert_eq!(row.1.as_deref(), Some("ROBINHOOD"));
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +778,28 @@ async fn seed_completed_connection(
         })))
         .mount(server)
         .await;
+    // The callback resolves the authorization via GET /authorizations.
+    // Capped at one match so subsequent list_connections / list_accounts
+    // calls in the test body fall through to per-test mocks.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/authorizations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": authorization_id,
+                "disabled": false,
+                "created_date": "2026-01-01T00:00:00Z",
+                "updated_date": "2026-01-01T00:00:00Z",
+                "brokerage": {
+                    "id": "brk-test",
+                    "slug": "TEST",
+                    "name": "Test Broker",
+                    "enabled": true,
+                }
+            }
+        ])))
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
 
     let token = app.mint_jwt(sub, Some(email), None, Duration::from_secs(600));
     app.client
@@ -583,8 +825,8 @@ async fn seed_completed_connection(
     )
     .expect("issue");
     let cb = format!(
-        "{}/api/v1/sync/snaptrade/callback?state={}&authorizationId={}&brokerage=TEST",
-        app.address, state, authorization_id
+        "{}/api/v1/sync/snaptrade/callback?state={}&userId={}",
+        app.address, state, sub
     );
     app.client.get(&cb).send().await.expect("cb");
     user_id
