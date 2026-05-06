@@ -219,3 +219,41 @@ pub async fn fetch_by_id_for_user(
     .await?;
     Ok(row)
 }
+
+/// Look up by `snaptrade_authorization_id` + user.
+///
+/// Used by DELETE/refresh handlers because the desktop client only knows
+/// SnapTrade's authorization id (it's the value of `BrokerConnectionDto.id`
+/// served by `/api/v1/sync/brokerage/connections`). The local
+/// `broker_connections.id` is a server-side detail that's never exposed
+/// over the API surface, so handlers MUST resolve via the SnapTrade id.
+pub async fn fetch_by_authorization_id_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    authorization_id: &str,
+) -> Result<Option<StoredConnection>, AppError> {
+    let row = sqlx::query_as!(
+        StoredConnection,
+        r#"
+        SELECT id,
+               user_id,
+               snaptrade_user_id,
+               snaptrade_user_secret_encrypted,
+               snaptrade_authorization_id,
+               broker_slug,
+               institution_name,
+               is_active,
+               disabled
+        FROM broker_connections
+        WHERE snaptrade_authorization_id = $1
+          AND user_id = $2
+          AND connection_type = 'snaptrade'
+        LIMIT 1
+        "#,
+        authorization_id,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}

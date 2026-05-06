@@ -614,12 +614,24 @@ async fn list_connections_empty_when_no_active_row() {
 
 #[tokio::test]
 async fn disconnect_deletes_upstream_and_soft_deletes_locally() {
+    // Path param is SnapTrade's authorization id (the value the desktop
+    // gets back from `/connections`), NOT the local broker_connections.id
+    // UUID. Earlier versions of the handler accepted Path<Uuid> and
+    // looked up by the local id, which always 404'd in production
+    // because clients only know the SnapTrade id.
     let (app, server) = wiremock_app().await;
-    let user_id =
-        seed_completed_connection(&app, &server, VALID_SUB, "del@example.com", "auth-del").await;
+    let authorization_id = "auth-del";
+    let user_id = seed_completed_connection(
+        &app,
+        &server,
+        VALID_SUB,
+        "del@example.com",
+        authorization_id,
+    )
+    .await;
 
-    // Find the local row id.
-    let row: (Uuid,) =
+    // Confirm the local row exists (used only to read post-state).
+    let local_row: (Uuid,) =
         sqlx::query_as("SELECT id FROM broker_connections WHERE user_id = $1 AND is_active = TRUE")
             .bind(user_id)
             .fetch_one(&app.pool)
@@ -627,7 +639,7 @@ async fn disconnect_deletes_upstream_and_soft_deletes_locally() {
             .expect("row");
 
     Mock::given(method("DELETE"))
-        .and(path("/api/v1/authorizations/auth-del"))
+        .and(path(format!("/api/v1/authorizations/{authorization_id}")))
         .and(header_exists("Signature"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
@@ -643,8 +655,8 @@ async fn disconnect_deletes_upstream_and_soft_deletes_locally() {
     let res = app
         .client
         .delete(format!(
-            "{}/api/v1/sync/brokerage/connections/{}",
-            app.address, row.0
+            "{}/api/v1/sync/brokerage/connections/{authorization_id}",
+            app.address
         ))
         .bearer_auth(&token)
         .send()
@@ -655,28 +667,29 @@ async fn disconnect_deletes_upstream_and_soft_deletes_locally() {
     // Local row must now be inactive + disabled.
     let after: (bool, bool) =
         sqlx::query_as("SELECT is_active, disabled FROM broker_connections WHERE id = $1")
-            .bind(row.0)
+            .bind(local_row.0)
             .fetch_one(&app.pool)
             .await
             .expect("row");
     assert_eq!(after, (false, true));
 
-    // Idempotency: a second DELETE on the same row → 404 (not in row set).
+    // Idempotency: a second DELETE with the same authorization id.
+    // After soft-delete the row's still in the table (just is_active=false,
+    // disabled=true) and the lookup is by snaptrade_authorization_id, so
+    // the handler resolves the row again. The `if !row.disabled` guard
+    // skips the upstream SnapTrade call, so this second DELETE is a no-op
+    // locally and never hits the wiremock again — verifying idempotency.
     let res2 = app
         .client
         .delete(format!(
-            "{}/api/v1/sync/brokerage/connections/{}",
-            app.address, row.0
+            "{}/api/v1/sync/brokerage/connections/{authorization_id}",
+            app.address
         ))
         .bearer_auth(&token)
         .send()
         .await
         .expect("request");
-    // After soft-delete it's no longer in the active set, but
-    // fetch_by_id_for_user matches on user_id+id regardless of is_active,
-    // so the second DELETE call still hits the handler. Either 200 (if we
-    // re-call SnapTrade) or… we want to assert "still works".
-    assert!(res2.status() == 200 || res2.status() == 404);
+    assert_eq!(res2.status(), 200);
 }
 
 // ---------------------------------------------------------------------------

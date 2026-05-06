@@ -544,11 +544,15 @@ pub async fn account_activities(
 pub async fn refresh_connection(
     State(state): State<AppState>,
     user: AuthenticatedUser,
-    Path(connection_id): Path<Uuid>,
+    Path(authorization_id): Path<String>,
 ) -> Result<Json<RefreshResponse>, AppError> {
-    let row = repository::fetch_by_id_for_user(state.db(), user.id, connection_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("connection not found"))?;
+    // The path param is SnapTrade's authorization id — that's what the
+    // desktop receives via `/connections` and uses as the row identifier.
+    // The local `broker_connections.id` UUID is never exposed to clients.
+    let row =
+        repository::fetch_by_authorization_id_for_user(state.db(), user.id, &authorization_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("connection not found"))?;
     let auth_id = row
         .snaptrade_authorization_id
         .as_deref()
@@ -585,11 +589,19 @@ pub struct RefreshResponse {
 pub async fn delete_connection(
     State(state): State<AppState>,
     user: AuthenticatedUser,
-    Path(connection_id): Path<Uuid>,
+    Path(authorization_id): Path<String>,
 ) -> Result<Json<RefreshResponse>, AppError> {
-    let row = repository::fetch_by_id_for_user(state.db(), user.id, connection_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("connection not found"))?;
+    // Path param is SnapTrade's authorization id (the value the desktop
+    // receives via `/connections` and uses as the row identity). The
+    // local `broker_connections.id` UUID is server-internal and never
+    // appears in the public API surface, so handlers MUST resolve via
+    // the SnapTrade id. Earlier versions accepted `Path<Uuid>` and
+    // looked up by local id, which produced a 404 on every disconnect
+    // because the two ID spaces don't match.
+    let row =
+        repository::fetch_by_authorization_id_for_user(state.db(), user.id, &authorization_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("connection not found"))?;
 
     // Already-disabled rows skip the SnapTrade call so a repeat DELETE is
     // a pure no-op locally (no upstream traffic, no audit duplication).
@@ -606,7 +618,9 @@ pub async fn delete_connection(
         }
     }
 
-    let _ = repository::soft_delete(state.db(), user.id, connection_id).await?;
+    // soft_delete still uses the local row id — we resolved it from the
+    // authorization-id lookup above.
+    let _ = repository::soft_delete(state.db(), user.id, row.id).await?;
     let _ = audit::record_event(
         state.db(),
         audit::AuditEvent::new("broker.disconnect")
