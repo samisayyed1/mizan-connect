@@ -2,13 +2,16 @@
 -- Forward-only. See .claude/skills/add-database-migration.md for rules.
 
 -- ---------------------------------------------------------------------------
--- Extend subscription_tier ENUM with the product manual's slugs.
--- Pre-existing values (basic/essentials/duo/plus) stay valid; code maps
--- legacy slugs to the "pro" matrix until the cloud cuts over fully.
--- ALTER TYPE ... ADD VALUE is idempotent in modern Postgres via IF NOT EXISTS.
+-- Convert subscription_tier from ENUM to TEXT-with-CHECK so we can add new
+-- slugs (`pro`, `enterprise`) without `ALTER TYPE ADD VALUE` — which can't
+-- run inside a transaction in older Postgres and is awkward under
+-- sqlx::migrate!'s default tx wrapping. Existing rows (`basic` / `essentials`
+-- / `duo` / `plus`) continue to round-trip unchanged as TEXT.
 -- ---------------------------------------------------------------------------
-ALTER TYPE subscription_tier ADD VALUE IF NOT EXISTS 'pro';
-ALTER TYPE subscription_tier ADD VALUE IF NOT EXISTS 'enterprise';
+ALTER TABLE subscriptions ALTER COLUMN tier TYPE TEXT USING tier::TEXT;
+DROP TYPE subscription_tier;
+ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_tier_check
+    CHECK (tier IN ('basic', 'essentials', 'duo', 'plus', 'pro', 'enterprise'));
 
 -- ---------------------------------------------------------------------------
 -- AI credit accounting on the subscription row.

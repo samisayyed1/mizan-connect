@@ -129,7 +129,7 @@ pub async fn upsert_from_webhook(
             tier, status,
             current_period_start, current_period_end,
             cancel_at_period_end
-        ) VALUES ($1, $2, $3, $4::subscription_tier, $5::subscription_status, $6, $7, $8)
+        ) VALUES ($1, $2, $3, $4, $5::subscription_status, $6, $7, $8)
         ON CONFLICT (stripe_subscription_id) DO UPDATE
           SET status               = EXCLUDED.status,
               tier                 = EXCLUDED.tier,
