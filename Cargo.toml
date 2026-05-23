@@ -29,6 +29,7 @@ debug = 1
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "sync", "fs", "time"] }
 tokio-util = "0.7"
 tokio-stream = "0.1"
+tokio-cron-scheduler = "0.10"
 
 # HTTP server
 axum = { version = "0.7", features = ["macros", "json", "tracing", "http2"] }

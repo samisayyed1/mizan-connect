@@ -20,6 +20,8 @@ pub mod credits;
 pub mod entitlements;
 pub mod handlers;
 pub mod prices;
+pub mod reports;
+pub mod reports_cron;
 pub mod repository;
 pub mod stripe_client;
 pub mod webhook;
@@ -99,6 +101,11 @@ pub fn router() -> Router<AppState> {
         // client appends `/chat/completions`). Same handler, same SSE
         // contract.
         .route("/chat/completions", post(ai_proxy::chat))
+        // Monthly AI Wealth Report (M3.6). GET = list, POST = enqueue on-demand.
+        .route(
+            "/reports/monthly",
+            get(reports::list_monthly_reports).post(reports::request_monthly_report),
+        )
         .route("/stripe/webhook", post(webhook::receive_webhook))
 }
 
