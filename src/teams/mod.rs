@@ -10,17 +10,26 @@
 //! 1:1.
 
 pub mod handlers;
+pub mod invites;
 pub mod model;
 pub mod repository;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 use crate::state::AppState;
 
-/// `/v1/me/teams` + `/v1/teams/:id/members` routes.
+/// Routes:
+/// - `GET  /me/teams`                — every team the caller is on (M5.2)
+/// - `GET  /teams/:id/members`       — roster (M5.2)
+/// - `POST /teams/:id/invites`       — owner-only invite creation (M5.3)
+/// - `GET  /invites/:token`          — public invite info (M5.3)
+/// - `POST /invites/:token/accept`   — authenticated invite redemption (M5.3)
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/me/teams", get(handlers::list_for_me))
         .route("/teams/:id/members", get(handlers::list_members))
+        .route("/teams/:id/invites", post(invites::create_invite))
+        .route("/invites/:token", get(invites::get_invite))
+        .route("/invites/:token/accept", post(invites::accept_invite))
 }

@@ -76,6 +76,7 @@ pub fn build_app(state: AppState) -> Router {
             "/user/me",
             axum::routing::get(crate::users::handlers::get_me),
         )
+        .merge(crate::teams::router())
         .merge(crate::billing::plans_router())
         .merge(crate::billing::router())
         .merge(crate::snaptrade::router())
