@@ -28,6 +28,7 @@ debug = 1
 # Async runtime
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "sync", "fs", "time"] }
 tokio-util = "0.7"
+tokio-stream = "0.1"
 
 # HTTP server
 axum = { version = "0.7", features = ["macros", "json", "tracing", "http2"] }
@@ -38,7 +39,7 @@ tower_governor = "0.4"
 governor = "0.6"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "stream"] }
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "macros", "migrate", "json", "time", "ipnetwork"] }
