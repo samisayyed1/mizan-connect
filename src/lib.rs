@@ -19,6 +19,7 @@ pub mod server;
 pub mod shutdown;
 pub mod snaptrade;
 pub mod state;
+pub mod teams;
 pub mod telemetry;
 pub mod users;
 
