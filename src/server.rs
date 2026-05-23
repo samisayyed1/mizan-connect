@@ -54,6 +54,7 @@ pub fn build_app(state: AppState) -> Router {
     // Legacy versioned mount. Kept live for tests and any internal callers.
     let v1 = Router::new()
         .merge(crate::users::router())
+        .merge(crate::teams::router())
         .merge(crate::billing::router())
         .with_state(state.clone());
 
