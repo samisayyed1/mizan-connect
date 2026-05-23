@@ -9,5 +9,18 @@
 //! the user's primary team via `team_members` instead of the implicit
 //! 1:1.
 
+pub mod handlers;
 pub mod model;
 pub mod repository;
+
+use axum::routing::get;
+use axum::Router;
+
+use crate::state::AppState;
+
+/// `/v1/me/teams` + `/v1/teams/:id/members` routes.
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/me/teams", get(handlers::list_for_me))
+        .route("/teams/:id/members", get(handlers::list_members))
+}
