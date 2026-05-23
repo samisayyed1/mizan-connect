@@ -9,6 +9,7 @@
 //! the user's primary team via `team_members` instead of the implicit
 //! 1:1.
 
+pub mod branding;
 pub mod handlers;
 pub mod invites;
 pub mod model;
@@ -20,11 +21,13 @@ use axum::Router;
 use crate::state::AppState;
 
 /// Routes:
-/// - `GET  /me/teams`                — every team the caller is on (M5.2)
-/// - `GET  /teams/:id/members`       — roster (M5.2)
-/// - `POST /teams/:id/invites`       — owner-only invite creation (M5.3)
-/// - `GET  /invites/:token`          — public invite info (M5.3)
-/// - `POST /invites/:token/accept`   — authenticated invite redemption (M5.3)
+/// - `GET   /me/teams`                — every team the caller is on (M5.2)
+/// - `GET   /teams/:id/members`       — roster (M5.2)
+/// - `POST  /teams/:id/invites`       — owner-only invite creation (M5.3)
+/// - `GET   /invites/:token`          — public invite info (M5.3)
+/// - `POST  /invites/:token/accept`   — authenticated invite redemption (M5.3)
+/// - `GET   /teams/:id/branding`      — read team branding (M5.4)
+/// - `PATCH /teams/:id/branding`      — owner-only branding update (M5.4)
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/me/teams", get(handlers::list_for_me))
@@ -32,4 +35,8 @@ pub fn router() -> Router<AppState> {
         .route("/teams/:id/invites", post(invites::create_invite))
         .route("/invites/:token", get(invites::get_invite))
         .route("/invites/:token/accept", post(invites::accept_invite))
+        .route(
+            "/teams/:id/branding",
+            get(branding::get_branding).patch(branding::patch_branding),
+        )
 }
