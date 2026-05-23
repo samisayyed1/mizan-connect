@@ -111,6 +111,9 @@ impl TestApp {
                 broker_secret_encryption_key: TEST_ENCRYPTION_KEY.to_vec(),
                 state_secret: SecretString::from(String::from(TEST_STATE_SECRET)),
             },
+            // Billing left unconfigured by default — tests that need Stripe
+            // wire a `BillingContext` directly into `AppState`.
+            billing: None,
         };
 
         let jwks = JwksCache::new(config.jwks_url());
@@ -123,7 +126,16 @@ impl TestApp {
         .expect("SnaptradeClient");
         let encryption = EncryptionKey::from_bytes(&TEST_ENCRYPTION_KEY).expect("32-byte test key");
 
-        let state = AppState::new(config.clone(), pool.clone(), jwks, snaptrade, encryption);
+        // No billing context in the default harness — tests that need
+        // billing wire one explicitly via `TestApp::spawn_with_billing`.
+        let state = AppState::new(
+            config.clone(),
+            pool.clone(),
+            jwks,
+            snaptrade,
+            encryption,
+            None,
+        );
         let app = build_app(state);
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))

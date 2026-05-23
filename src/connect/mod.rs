@@ -1,22 +1,21 @@
-//! `/api/v1/...` Connect-API stubs that haven't migrated to feature
-//! modules yet.
+//! `/api/v1/...` Connect-API stubs from Chunks 1-3.
 //!
-//! After Chunk 3, the only remaining stub here is `/subscription/plans`,
-//! which is reachable with or without a bearer token (the desktop client
-//! calls it from two distinct functions). Stripe billing in Chunk 4 will
-//! replace this stub with a real handler.
+//! After Chunk 4 there are no live stubs left here — the brokerage routes
+//! moved to [`crate::snaptrade::router`] and the `/subscription/plans` stub
+//! has been replaced by the real handler in
+//! [`crate::billing::handlers::list_plans`] (mounted via
+//! [`crate::billing::plans_router`]).
 //!
-//! The brokerage routes that used to live here moved to
-//! [`crate::snaptrade::router`].
+//! Module path kept so legacy imports don't break; router is intentionally
+//! empty.
 
 pub mod handlers;
 
-use axum::routing::get;
 use axum::Router;
 
 use crate::state::AppState;
 
-/// Router mounted at `/api/v1`.
+/// Empty router. Kept so callers that still reference it merge a no-op.
 pub fn router() -> Router<AppState> {
-    Router::new().route("/subscription/plans", get(handlers::subscription_plans))
+    Router::new()
 }

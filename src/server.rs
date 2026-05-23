@@ -54,6 +54,7 @@ pub fn build_app(state: AppState) -> Router {
     // Legacy versioned mount. Kept live for tests and any internal callers.
     let v1 = Router::new()
         .merge(crate::users::router())
+        .merge(crate::billing::router())
         .with_state(state.clone());
 
     // Production mount. The desktop client (samisayyed1/mizan-4) calls
@@ -62,16 +63,20 @@ pub fn build_app(state: AppState) -> Router {
     // for backend chunks. We expose:
     //   - /api/v1/me                            (alias of /v1/me)
     //   - /api/v1/user/me                       (desktop's actual call)
-    //   - /api/v1/subscription/plans            (Chunk 4 stub)
+    //   - /api/v1/subscription/plans            (Chunk 4)
     //   - /api/v1/sync/brokerage/*              (Chunk 3 — real, SnapTrade-backed)
     //   - /api/v1/sync/snaptrade/callback       (PUBLIC — bound by state JWT)
+    //   - /api/v1/billing/*                     (Chunk 4 — Stripe checkout/portal)
+    //   - /api/v1/usage                         (Chunk 4 — usage ledger)
+    //   - /api/v1/stripe/webhook                (Chunk 4 — public, signature-verified)
     let api_v1 = Router::new()
         .merge(crate::users::router())
         .route(
             "/user/me",
             axum::routing::get(crate::users::handlers::get_me),
         )
-        .merge(crate::connect::router())
+        .merge(crate::billing::plans_router())
+        .merge(crate::billing::router())
         .merge(crate::snaptrade::router())
         .with_state(state.clone());
 

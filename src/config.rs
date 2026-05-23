@@ -97,6 +97,38 @@ pub struct Config {
 
     /// SnapTrade integration (Chunk 3). Required outside of test env.
     pub snaptrade: SnaptradeConfig,
+
+    /// Stripe + AI billing (Chunk 4). `None` collapses billing endpoints to a
+    /// clean `not_implemented` response — useful for local dev without Stripe
+    /// keys configured.
+    pub billing: Option<BillingConfig>,
+}
+
+/// Billing configuration. All-or-nothing: every field must be present or the
+/// whole block is treated as absent and billing endpoints disable themselves.
+#[derive(Debug, Clone)]
+pub struct BillingConfig {
+    pub stripe_secret_key: SecretString,
+    pub stripe_webhook_secret: SecretString,
+    pub stripe_prices: BillingPrices,
+    /// Where Stripe redirects the browser after Checkout/Portal. The desktop's
+    /// auth-callback page handles this URL.
+    pub return_url: String,
+    /// Optional OpenAI key for the managed-AI proxy. When absent, the AI proxy
+    /// endpoint rejects with `service_unavailable` even for paid users.
+    pub openai_api_key: Option<SecretString>,
+}
+
+/// Stripe Price IDs sourced from env. Empty strings → "not for sale yet"
+/// (handler returns `bad_request("plan/interval not available")`).
+#[derive(Debug, Clone, Default)]
+pub struct BillingPrices {
+    pub basic_monthly: String,
+    pub basic_yearly: String,
+    pub pro_monthly: String,
+    pub pro_yearly: String,
+    pub enterprise_monthly: String,
+    pub enterprise_yearly: String,
 }
 
 /// SnapTrade configuration. Required outside of `APP_ENV=test`.
@@ -160,6 +192,20 @@ struct RawConfig {
     snaptrade_redirect_uri: Option<String>,
     mizan_broker_secret_encryption_key: Option<String>,
     mizan_snaptrade_state_secret: Option<String>,
+
+    // Stripe billing (Chunk 4)
+    stripe_secret_key: Option<String>,
+    stripe_webhook_secret: Option<String>,
+    stripe_price_basic_monthly: Option<String>,
+    stripe_price_basic_yearly: Option<String>,
+    stripe_price_pro_monthly: Option<String>,
+    stripe_price_pro_yearly: Option<String>,
+    stripe_price_enterprise_monthly: Option<String>,
+    stripe_price_enterprise_yearly: Option<String>,
+    mizan_billing_return_url: Option<String>,
+
+    // Managed AI proxy (Chunk 4)
+    openai_api_key: Option<String>,
 }
 
 impl Config {
@@ -205,6 +251,7 @@ impl Config {
         // Build SnapTrade config first — it borrows `&raw` and would
         // otherwise conflict with the `raw.…` field moves below.
         let snaptrade = build_snaptrade_config(&raw, app_env)?;
+        let billing = build_billing_config(&raw);
 
         let test_jwt_secret = if app_env.is_production() {
             None
@@ -248,6 +295,7 @@ impl Config {
             sentry,
             test_jwt_secret,
             snaptrade,
+            billing,
         })
     }
 
@@ -400,6 +448,60 @@ fn parse_optional<T: FromStr<Err = String>>(
         Some(v) => T::from_str(v).map_err(|reason| ConfigError::Invalid { var, reason }),
         None => Ok(default),
     }
+}
+
+/// Build the [`BillingConfig`] from env, or `None` when the operator hasn't
+/// configured Stripe yet. All-or-nothing: if either `STRIPE_SECRET_KEY` or
+/// `STRIPE_WEBHOOK_SECRET` is missing, billing is disabled entirely so a
+/// half-configured server can't serve "200 OK" on broken checkout flows.
+fn build_billing_config(raw: &RawConfig) -> Option<BillingConfig> {
+    let secret = raw
+        .stripe_secret_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let webhook = raw
+        .stripe_webhook_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let return_url = raw
+        .mizan_billing_return_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://mizan.app/billing/return")
+        .to_string();
+
+    let prices = BillingPrices {
+        basic_monthly: raw.stripe_price_basic_monthly.clone().unwrap_or_default(),
+        basic_yearly: raw.stripe_price_basic_yearly.clone().unwrap_or_default(),
+        pro_monthly: raw.stripe_price_pro_monthly.clone().unwrap_or_default(),
+        pro_yearly: raw.stripe_price_pro_yearly.clone().unwrap_or_default(),
+        enterprise_monthly: raw
+            .stripe_price_enterprise_monthly
+            .clone()
+            .unwrap_or_default(),
+        enterprise_yearly: raw
+            .stripe_price_enterprise_yearly
+            .clone()
+            .unwrap_or_default(),
+    };
+
+    let openai_api_key = raw
+        .openai_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| SecretString::from(s.to_string()));
+
+    Some(BillingConfig {
+        stripe_secret_key: SecretString::from(secret.to_string()),
+        stripe_webhook_secret: SecretString::from(webhook.to_string()),
+        stripe_prices: prices,
+        return_url,
+        openai_api_key,
+    })
 }
 
 fn parse_cors(raw: Option<&str>, reject_wildcard: bool) -> Result<Vec<String>, ConfigError> {
