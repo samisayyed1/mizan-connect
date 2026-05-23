@@ -94,6 +94,11 @@ pub fn router() -> Router<AppState> {
         .route("/billing/portal", post(handlers::create_portal_session))
         .route("/usage", post(handlers::record_usage))
         .route("/ai/chat", post(ai_proxy::chat))
+        // OpenAI-compatible alias: lets the desktop's `mizan` provider use a
+        // stock rig-core OpenAI client by setting only the base URL (the
+        // client appends `/chat/completions`). Same handler, same SSE
+        // contract.
+        .route("/chat/completions", post(ai_proxy::chat))
         .route("/stripe/webhook", post(webhook::receive_webhook))
 }
 

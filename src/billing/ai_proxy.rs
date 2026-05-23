@@ -1,33 +1,44 @@
 //! Managed-AI proxy endpoint — `POST /v1/ai/chat`.
 //!
-//! Pre-call:
-//!   - Verify the user has `managed_ai` entitlement.
-//!   - Reserve the request's estimated cost; reject 402 if it would exceed the
-//!     monthly cap (unless that cap is `UNLIMITED`).
+//! **SSE streaming**: the client (the desktop's `mizan` provider) opens an
+//! event-stream and receives each upstream chunk as one `data: {...}` SSE
+//! event. The proxy re-frames the OpenAI stream into a clean event-stream:
+//!   - non-`data:` upstream lines (comments, blank) are dropped;
+//!   - `data: {...}` deltas are forwarded verbatim (so existing OpenAI
+//!     client libraries on the desktop side just work);
+//!   - `data: [DONE]` is forwarded as the terminator;
+//!   - the final upstream chunk carries `usage` (requested via
+//!     `stream_options.include_usage = true`) → we extract it, then in the
+//!     same task close the stream, write a `usage_ledger` row, and bump
+//!     `subscriptions.ai_credits_used` atomically.
 //!
-//! Forward:
-//!   - Pass the request through to upstream OpenAI using the cloud-owned key.
-//!     Same JSON schema as `/v1/chat/completions` — the desktop's `mizan`
-//!     provider speaks it directly.
+//! Pre-flight gates (entitlement + monthly cap) are identical to the
+//! non-streaming version that shipped in M1.5; only the response path moves
+//! to SSE.
 //!
-//! Post-call:
-//!   - Reconcile the *actual* token usage → credit charge via
-//!     [`crate::billing::credits::credits_for_tokens`]; append a
-//!     `usage_ledger` row + bump `subscriptions.ai_credits_used` atomically.
-//!
-//! Streaming SSE forwarding lands as a follow-up; this initial cut handles
-//! the non-streaming JSON case (`stream: false`) — sufficient for the desktop
-//! provider's `complete` path and 90% of usage.
+//! Concurrency model: a `tokio::spawn`ed task drives the upstream stream and
+//! pushes SSE events into a bounded `mpsc::channel`. The handler returns an
+//! `Sse<ReceiverStream<…>>` that drains the channel. When upstream closes,
+//! the task writes the ledger and drops the sender — that closes the SSE
+//! cleanly. Errors mid-stream are logged but don't bubble into the SSE
+//! payload (the desktop sees a truncated stream — same UX as any network
+//! drop, and the user can retry; we don't double-charge because the ledger
+//! write only runs on the success path).
 
+use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures::stream::StreamExt;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::auth::AuthenticatedUser;
 use crate::billing::credits::{credits_for_tokens, RequestKind};
@@ -38,10 +49,9 @@ use crate::state::AppState;
 
 const OPENAI_BASE: &str = "https://api.openai.com";
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
-const UPSTREAM_TIMEOUT_SECS: u64 = 60;
+const UPSTREAM_TIMEOUT_SECS: u64 = 120;
+const SSE_CHANNEL_CAPACITY: usize = 32;
 
-/// Request body. Camel/snake compatible — we pass extra fields through, so
-/// any OpenAI chat-completion knob the client sets reaches upstream verbatim.
 #[derive(Debug, Deserialize)]
 pub struct AiChatRequest {
     #[serde(default)]
@@ -50,21 +60,12 @@ pub struct AiChatRequest {
     /// Sets the pre-call credit reservation; absent ⇒ `simple`.
     #[serde(default)]
     pub kind: Option<RequestKind>,
-    /// Pass-through of every other OpenAI field (messages, tools, temperature, etc.).
+    /// Pass-through of every other OpenAI field (messages, tools, temperature, …).
     #[serde(flatten)]
     pub passthrough: Value,
 }
 
-/// Response. The desktop reads `choices` + `usage` like any OpenAI client.
-#[derive(Debug, Serialize)]
-pub struct AiChatResponse {
-    pub model: String,
-    pub choices: Value,
-    pub usage: TokenUsage,
-    pub mizan_credits: CreditCharge,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct TokenUsage {
     #[serde(default)]
     pub prompt_tokens: u32,
@@ -74,32 +75,35 @@ pub struct TokenUsage {
     pub total_tokens: u32,
 }
 
-#[derive(Debug, Serialize)]
-pub struct CreditCharge {
-    pub charged: i32,
-    pub used: i32,
-    pub monthly: i32,
-}
-
+/// `POST /v1/ai/chat` — SSE streaming proxy.
+///
+/// Returns `200 OK` + `text/event-stream` on success; `403` if the user lacks
+/// `managed_ai`; `422` if their monthly credit cap would be exceeded; `503`
+/// if managed AI isn't configured on this server or the upstream errors at
+/// the connection step.
 pub async fn chat(
     State(state): State<AppState>,
     user: AuthenticatedUser,
     Json(req): Json<AiChatRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    // ── Pre-call gate ──────────────────────────────────────────────────
+) -> Result<Response, AppError> {
+    // ── Pre-flight: entitlement + cap reservation ──────────────────────
     let billing = state
         .billing()
         .ok_or_else(|| AppError::not_implemented("billing/AI not configured"))?;
-    let openai_key = billing.openai_key.as_ref().ok_or_else(|| {
-        AppError::service_unavailable("managed AI is not configured on this server")
-    })?;
+    let openai_key = billing
+        .openai_key
+        .as_ref()
+        .ok_or_else(|| {
+            AppError::service_unavailable("managed AI is not configured on this server")
+        })?
+        .clone();
 
     let sub = billing_repo::fetch_active(state.db(), user.id).await?;
-    let (ent_status, ent_tier) = match &sub {
-        Some(s) => (Some(s.status.as_str()), Some(s.tier.as_str())),
+    let (tier, status) = match &sub {
+        Some(s) => (Some(s.tier.as_str()), Some(s.status.as_str())),
         None => (None, None),
     };
-    let entitlements = crate::billing::entitlements::entitlements_for(ent_tier, ent_status);
+    let entitlements = crate::billing::entitlements::entitlements_for(tier, status);
     if !entitlements.managed_ai {
         return Err(AppError::forbidden(
             "managed Mizan AI requires a subscription",
@@ -117,90 +121,197 @@ pub async fn chat(
         ));
     }
 
-    // ── Forward to OpenAI ──────────────────────────────────────────────
+    // ── Build upstream request body ────────────────────────────────────
     let model = req.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut upstream_body = req.passthrough.clone();
     if let Value::Object(map) = &mut upstream_body {
         map.insert("model".to_string(), Value::String(model.clone()));
-        // We don't support streaming yet; force non-stream so we can read the
-        // usage object directly and reconcile credits.
-        map.insert("stream".to_string(), Value::Bool(false));
+        map.insert("stream".to_string(), Value::Bool(true));
+        // include_usage gives us the token counts in the final chunk before
+        // `[DONE]` so we can reconcile credits without re-tokenizing.
+        map.insert(
+            "stream_options".to_string(),
+            json!({ "include_usage": true }),
+        );
     }
 
+    // ── Open the upstream connection ───────────────────────────────────
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
         .build()
         .map_err(|e| AppError::internal("AI proxy http client").with_source(e))?;
-
-    let resp = http
+    let upstream_resp = http
         .post(format!("{}/v1/chat/completions", OPENAI_BASE))
         .bearer_auth(openai_key.expose_secret())
         .json(&upstream_body)
         .send()
         .await
         .map_err(|e| AppError::service_unavailable("upstream AI unreachable").with_source(e))?;
-    let status = resp.status();
-    let raw = resp
-        .text()
-        .await
-        .map_err(|e| AppError::service_unavailable("upstream AI read failed").with_source(e))?;
-    if !status.is_success() {
-        tracing::warn!(upstream_status = status.as_u16(), body = %raw, "upstream AI error");
+    let upstream_status = upstream_resp.status();
+    if !upstream_status.is_success() {
+        let body = upstream_resp.text().await.unwrap_or_default();
+        tracing::warn!(upstream_status = upstream_status.as_u16(), body = %body, "upstream AI error");
         return Err(AppError::service_unavailable(
             "upstream AI returned an error",
         ));
     }
-    let upstream: Value = serde_json::from_str(&raw).map_err(|e| {
-        AppError::service_unavailable("malformed upstream AI response").with_source(e)
-    })?;
 
-    // ── Reconcile ──────────────────────────────────────────────────────
-    let usage = upstream
-        .get("usage")
-        .cloned()
-        .and_then(|v| serde_json::from_value::<TokenUsage>(v).ok())
-        .unwrap_or(TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        });
-    let charged = credits_for_tokens(usage.prompt_tokens, usage.completion_tokens);
-
-    let mut tx = state.db().begin().await?;
-    billing_repo::record_usage(
-        &mut tx,
-        user.id,
-        "ai_reply",
-        usage.total_tokens as i32,
-        charged,
-        Some(&model),
-        Some(match kind {
-            RequestKind::Simple => "simple",
-            RequestKind::Analysis => "analysis",
-            RequestKind::CsvMapping => "csv_mapping",
-            RequestKind::MonthlyReport => "monthly_report",
-            RequestKind::DeepReport => "deep_report",
-        }),
-    )
-    .await?;
-    let new_used = if sub.is_some() {
-        billing_repo::add_ai_credits_used(&mut tx, user.id, charged).await?
-    } else {
-        // No paid subscription row → user is on Free (entitlements.managed_ai
-        // would have rejected above). Should be unreachable.
-        used + charged
+    // ── Spawn the streamer ─────────────────────────────────────────────
+    let (tx_evt, rx_evt) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_CAPACITY);
+    let db = state.db().clone();
+    let user_id = user.id;
+    let model_for_task = model.clone();
+    let kind_str = match kind {
+        RequestKind::Simple => "simple",
+        RequestKind::Analysis => "analysis",
+        RequestKind::CsvMapping => "csv_mapping",
+        RequestKind::MonthlyReport => "monthly_report",
+        RequestKind::DeepReport => "deep_report",
     };
-    tx.commit().await?;
 
-    let body = json!({
-        "model": model,
-        "choices": upstream.get("choices").cloned().unwrap_or(json!([])),
-        "usage": usage,
-        "mizan_credits": {
-            "charged": charged,
-            "used": new_used,
-            "monthly": monthly,
-        }
+    tokio::spawn(async move {
+        run_stream(upstream_resp, tx_evt, db, user_id, model_for_task, kind_str).await;
     });
-    Ok((StatusCode::OK, Json(body)))
+
+    // ── Return the SSE response ────────────────────────────────────────
+    let stream = ReceiverStream::new(rx_evt);
+    Ok((
+        StatusCode::OK,
+        Sse::new(stream).keep_alive(KeepAlive::default()),
+    )
+        .into_response())
+}
+
+/// Drives the upstream stream → SSE channel → ledger reconciliation.
+///
+/// Runs inside a `tokio::spawn`. Any error here is logged + ends the SSE;
+/// the ledger writes (which spend the user's credits) only fire on the
+/// success path so we never charge for a stream the user didn't receive.
+async fn run_stream(
+    upstream_resp: reqwest::Response,
+    tx_evt: mpsc::Sender<Result<Event, Infallible>>,
+    db: sqlx::PgPool,
+    user_id: uuid::Uuid,
+    model: String,
+    kind: &'static str,
+) {
+    let mut buf = String::new();
+    let mut usage = TokenUsage::default();
+    let mut saw_done = false;
+    let mut byte_stream = upstream_resp.bytes_stream();
+
+    while let Some(chunk_res) = byte_stream.next().await {
+        let chunk = match chunk_res {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "AI proxy upstream stream error");
+                break;
+            }
+        };
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Process complete lines (OpenAI separates events with `\n\n` and
+        // individual lines with `\n`; we treat each `\n`-terminated line
+        // independently and let blank lines fall through harmlessly).
+        while let Some(nl) = buf.find('\n') {
+            let line = buf[..nl].trim_end_matches('\r').to_string();
+            buf.replace_range(..=nl, "");
+
+            let Some(payload) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if payload == "[DONE]" {
+                saw_done = true;
+                let _ = tx_evt.send(Ok(Event::default().data("[DONE]"))).await;
+                break;
+            }
+
+            // Try to extract usage if present — OpenAI puts it in the
+            // last chunk before `[DONE]` when stream_options.include_usage.
+            if let Ok(v) = serde_json::from_str::<Value>(payload) {
+                if let Some(u) = v.get("usage").cloned() {
+                    if let Ok(parsed) = serde_json::from_value::<TokenUsage>(u) {
+                        usage = parsed;
+                    }
+                }
+            }
+
+            if tx_evt
+                .send(Ok(Event::default().data(payload)))
+                .await
+                .is_err()
+            {
+                // Receiver dropped (client disconnected). Stop streaming
+                // but DON'T charge — incomplete reply.
+                tracing::info!("AI proxy: client disconnected mid-stream");
+                return;
+            }
+        }
+        if saw_done {
+            break;
+        }
+    }
+
+    // ── Reconcile on the success path ──────────────────────────────────
+    if !saw_done {
+        tracing::warn!("AI proxy: upstream closed without [DONE]; skipping charge");
+        return;
+    }
+
+    let charged = credits_for_tokens(usage.prompt_tokens, usage.completion_tokens);
+    match db.begin().await {
+        Ok(mut tx) => {
+            if let Err(e) = billing_repo::record_usage(
+                &mut tx,
+                user_id,
+                "ai_reply",
+                usage.total_tokens as i32,
+                charged,
+                Some(&model),
+                Some(kind),
+            )
+            .await
+            {
+                tracing::error!(error = %e, "AI proxy: usage_ledger insert failed");
+                let _ = tx.rollback().await;
+                return;
+            }
+            if let Err(e) = billing_repo::add_ai_credits_used(&mut tx, user_id, charged).await {
+                tracing::error!(error = %e, "AI proxy: ai_credits_used bump failed");
+                let _ = tx.rollback().await;
+                return;
+            }
+            if let Err(e) = tx.commit().await {
+                tracing::error!(error = %e, "AI proxy: ledger commit failed");
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "AI proxy: failed to open ledger tx");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn token_usage_default_zero() {
+        let u = TokenUsage::default();
+        assert_eq!(u.total_tokens, 0);
+        assert_eq!(credits_for_tokens(u.prompt_tokens, u.completion_tokens), 1);
+        // floor
+    }
+
+    #[test]
+    fn parsed_usage_drives_credit_cost() {
+        let payload = r#"{"id":"chatcmpl-x","choices":[],"usage":{"prompt_tokens":500,"completion_tokens":1500,"total_tokens":2000}}"#;
+        let v: Value = serde_json::from_str(payload).unwrap();
+        let u: TokenUsage = serde_json::from_value(v.get("usage").unwrap().clone()).unwrap();
+        assert_eq!(u.prompt_tokens, 500);
+        assert_eq!(u.completion_tokens, 1500);
+        // 500 prompt + 3*1500 completion = 5000 weighted → 5 credits.
+        assert_eq!(credits_for_tokens(u.prompt_tokens, u.completion_tokens), 5);
+    }
 }
