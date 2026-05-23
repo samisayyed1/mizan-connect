@@ -90,8 +90,8 @@ async fn me_returns_user_with_valid_token() {
     assert_eq!(res.status(), 200, "expected 200, got {}", res.status());
     let body: serde_json::Value = res.json().await.expect("json");
     assert_eq!(body["email"], "alice@example.com");
-    assert_eq!(body["display_name"], "Alice");
-    assert_eq!(body["supabase_user_id"], VALID_SUB);
+    assert_eq!(body["displayName"], "Alice");
+    assert_eq!(body["supabaseUserId"], VALID_SUB);
     assert!(Uuid::parse_str(body["id"].as_str().expect("id str")).is_ok());
 }
 
@@ -168,7 +168,7 @@ async fn patch_me_updates_display_name() {
 
     assert_eq!(res.status(), 200);
     let body: serde_json::Value = res.json().await.expect("json");
-    assert_eq!(body["display_name"], "Alice II");
+    assert_eq!(body["displayName"], "Alice II");
 }
 
 #[tokio::test]

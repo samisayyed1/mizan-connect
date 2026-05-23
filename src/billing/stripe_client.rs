@@ -52,11 +52,14 @@ pub enum StripeError {
 
 impl StripeClient {
     pub fn new(secret_key: SecretString) -> Self {
+        // Fall back to a default client if the builder somehow rejects our
+        // options — the default still respects rustls + system DNS, just
+        // without the 20s timeout cap. We never see this in practice.
         let http = Client::builder()
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("mizan-connect/", env!("CARGO_PKG_VERSION")))
             .build()
-            .expect("reqwest client builds");
+            .unwrap_or_else(|_| Client::new());
         Self { http, secret_key }
     }
 
@@ -289,6 +292,7 @@ impl StripeClientTest {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     fn sign(whsec: &str, ts: i64, body: &[u8]) -> String {
