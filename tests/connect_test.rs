@@ -48,9 +48,9 @@ async fn user_me_alias_returns_same_dto_as_v1_me() {
         .expect("legacy json");
 
     assert_eq!(alias["id"], legacy["id"], "same local user id");
-    assert_eq!(alias["supabase_user_id"], legacy["supabase_user_id"]);
+    assert_eq!(alias["supabaseUserId"], legacy["supabaseUserId"]);
     assert_eq!(alias["email"], "alias@example.com");
-    assert_eq!(alias["display_name"], "Alias Tester");
+    assert_eq!(alias["displayName"], "Alias Tester");
 }
 
 #[tokio::test]
@@ -68,11 +68,11 @@ async fn user_me_alias_returns_401_without_token() {
 }
 
 // ---------------------------------------------------------------------------
-// /api/v1/subscription/plans — 501 with or without auth
+// /api/v1/subscription/plans — Chunk 4: real plan catalog (Basic/Pro/Enterprise)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn subscription_plans_returns_501_with_auth() {
+async fn subscription_plans_returns_catalog_with_auth() {
     let app = TestApp::spawn().await;
     let token = app.mint_jwt(
         VALID_SUB,
@@ -89,20 +89,22 @@ async fn subscription_plans_returns_501_with_auth() {
         .await
         .expect("request");
 
-    assert_eq!(res.status(), 501);
+    assert_eq!(res.status(), 200);
     let body: serde_json::Value = res.json().await.expect("json");
-    assert_eq!(body["error"]["code"], "not_implemented");
-    let request_id = body["error"]["request_id"]
-        .as_str()
-        .expect("request_id present");
-    assert!(!request_id.is_empty(), "request_id is non-empty");
+    let plans = body["plans"].as_array().expect("plans array");
+    let slugs: Vec<&str> = plans
+        .iter()
+        .map(|p| p["id"].as_str().unwrap_or(""))
+        .collect();
+    assert!(slugs.contains(&"basic"));
+    assert!(slugs.contains(&"pro"));
+    assert!(slugs.contains(&"enterprise"));
 }
 
 #[tokio::test]
-async fn subscription_plans_returns_501_without_auth() {
-    // The desktop also hits this path anonymously
-    // (see fetch_subscription_plans_public in crates/connect). Must not
-    // 401 — both flows should land on the same 501.
+async fn subscription_plans_returns_catalog_without_auth() {
+    // The desktop hits this path anonymously too
+    // (see fetch_subscription_plans_public in crates/connect).
     let app = TestApp::spawn().await;
     let res = app
         .client
@@ -111,7 +113,7 @@ async fn subscription_plans_returns_501_without_auth() {
         .await
         .expect("request");
 
-    assert_eq!(res.status(), 501, "no auth required for plans stub");
+    assert_eq!(res.status(), 200, "no auth required for plans");
     let body: serde_json::Value = res.json().await.expect("json");
-    assert_eq!(body["error"]["code"], "not_implemented");
+    assert!(body["plans"].as_array().expect("plans array").len() >= 3);
 }
