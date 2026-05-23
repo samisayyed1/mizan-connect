@@ -5,6 +5,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::auth::jwks::JwksCache;
+use crate::billing::BillingContext;
 use crate::config::Config;
 use crate::snaptrade::client::SnaptradeClient;
 use crate::snaptrade::encryption::EncryptionKey;
@@ -25,6 +26,9 @@ struct Inner {
     snaptrade: SnaptradeClient,
     encryption: EncryptionKey,
     login_portal_limiter: LoginPortalLimiter,
+    /// Optional — present only when Stripe + billing env vars are configured.
+    /// Handlers fall back to `not_implemented` when this is `None`.
+    billing: Option<BillingContext>,
 }
 
 impl AppState {
@@ -34,6 +38,7 @@ impl AppState {
         jwks: JwksCache,
         snaptrade: SnaptradeClient,
         encryption: EncryptionKey,
+        billing: Option<BillingContext>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -43,6 +48,7 @@ impl AppState {
                 snaptrade,
                 encryption,
                 login_portal_limiter: LoginPortalLimiter::new(),
+                billing,
             }),
         }
     }
@@ -69,5 +75,11 @@ impl AppState {
 
     pub fn login_portal_limiter(&self) -> &LoginPortalLimiter {
         &self.inner.login_portal_limiter
+    }
+
+    /// Billing context, when Stripe is configured. `None` collapses every
+    /// billing endpoint to a clean `not_implemented` response.
+    pub fn billing(&self) -> Option<&BillingContext> {
+        self.inner.billing.as_ref()
     }
 }

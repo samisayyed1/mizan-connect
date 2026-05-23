@@ -159,6 +159,7 @@ mod tests {
                 broker_secret_encryption_key: vec![],
                 state_secret: SecretString::from(String::new()),
             },
+            billing: None,
         }
     }
 

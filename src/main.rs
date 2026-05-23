@@ -5,6 +5,7 @@
 use anyhow::Context;
 use mizan_connect::{
     auth::JwksCache,
+    billing::{BillingContext, StripeClient, StripePrices},
     config::Config,
     db, server, shutdown,
     snaptrade::{client::SnaptradeClient, encryption::EncryptionKey},
@@ -52,7 +53,33 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("constructing SnaptradeClient")?;
 
-    let state = AppState::new(config.clone(), pool, jwks, snaptrade, encryption);
+    // Billing context (Chunk 4). Optional: `None` collapses the billing
+    // endpoints to `not_implemented` so dev/staging without Stripe still boots.
+    let billing = config.billing.as_ref().map(|bc| {
+        let stripe = StripeClient::new(bc.stripe_secret_key.clone());
+        let prices = StripePrices {
+            basic_monthly: bc.stripe_prices.basic_monthly.clone(),
+            basic_yearly: bc.stripe_prices.basic_yearly.clone(),
+            pro_monthly: bc.stripe_prices.pro_monthly.clone(),
+            pro_yearly: bc.stripe_prices.pro_yearly.clone(),
+            enterprise_monthly: bc.stripe_prices.enterprise_monthly.clone(),
+            enterprise_yearly: bc.stripe_prices.enterprise_yearly.clone(),
+        };
+        BillingContext::new(
+            stripe,
+            prices,
+            bc.stripe_webhook_secret.clone(),
+            bc.return_url.clone(),
+            bc.openai_api_key.clone(),
+        )
+    });
+    if billing.is_some() {
+        tracing::info!("billing context loaded (Stripe configured)");
+    } else {
+        tracing::warn!("billing context not configured — checkout/portal endpoints return 501");
+    }
+
+    let state = AppState::new(config.clone(), pool, jwks, snaptrade, encryption, billing);
     let app = server::build_app(state);
     let addr = server::bind_addr(&config);
 
