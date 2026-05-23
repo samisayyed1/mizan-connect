@@ -79,7 +79,27 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("billing context not configured — checkout/portal endpoints return 501");
     }
 
-    let state = AppState::new(config.clone(), pool, jwks, snaptrade, encryption, billing);
+    let state = AppState::new(
+        config.clone(),
+        pool.clone(),
+        jwks,
+        snaptrade,
+        encryption,
+        billing,
+    );
+
+    // Boot the monthly-reports scheduler (M3.6). Held for the lifetime of the
+    // process — drop on exit = graceful shutdown of cron jobs. Doesn't block
+    // serving; on failure we log + carry on (reports will simply not
+    // auto-generate until the next deploy).
+    let _reports_scheduler = match mizan_connect::billing::reports_cron::start(pool).await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to start monthly-reports scheduler");
+            None
+        }
+    };
+
     let app = server::build_app(state);
     let addr = server::bind_addr(&config);
 
